@@ -5,6 +5,12 @@ analysis_pipeline.py  -  遮蔽率 × GPS誤差 計算パイプライン
 GLIMダンプの遮蔽率を計算し、rosbagからGPS-GLIM誤差を計算してCSVへ保存。
 グラフ作成は plot_notebook.ipynb 側で行う設計（責務分離）。
 
+内部で SE(2) アライメント（最初のGPSフレームの x0/y0/yaw0 を基準）を実施。
+GLIM が fix_correction なしで起動された場合、dump 内の T_world_lidar は
+GLIMローカル座標（初期位置=原点）になるため、この変換が必須となる。
+これにより fix_correlation_csv.py は不要化（削除済み）。
+compare_trajectory.py は軌跡可視化（PNG出力）の補助スクリプトとして併存。
+
 使い方:
   # ① 全部まとめて実行（遮蔽率計算 + GPS誤差 → 2つのCSV出力）
 python3 analysis_pipeline.py \
@@ -27,6 +33,7 @@ python3 analysis_pipeline.py \
 出力ファイル:
   occlusion_rate.csv  : stamp, occlusion_rate, folder, n_upper, n_in_range
   correlation.csv     : stamp, occlusion_rate, gps_error, x_glim, y_glim, x_gps, y_gps
+                        ※ x_glim, y_glim は SE(2)アライメント済み（GPS座標系）
 
 → これらのCSVを plot_notebook.ipynb で読み込んでグラフを作成する。
 """
@@ -34,6 +41,7 @@ python3 analysis_pipeline.py \
 import os
 import sys
 import csv
+import math
 import argparse
 import numpy as np
 
@@ -47,7 +55,6 @@ EL_MIN_DEG  = 15.0    # 仰角カットオフ [°]（GPS mask角相当）
 ANGLE_DEG   = 5.0     # レイ許容角 [°]
 
 TOPIC_GPS   = "/odom/UM982"
-TOPIC_GLIM  = "/odom/combine_glim"
 SYNC_TOL    = 1.0     # 時刻同期許容幅 [秒]
 
 
@@ -129,8 +136,11 @@ def load_occlusion_csv(path):
 # ──────────────────────────────────────────────
 #  Step 2: GPS-GLIM 誤差計算
 # ──────────────────────────────────────────────
-def read_odom_from_bag(bag_path, topic_name):
-    """rosbag2 から (stamp, x, y) のリストを取得。ROS2環境必須。"""
+def read_odom_from_bag(bag_path, topic_name, with_yaw=False):
+    """rosbag2 から odometry を取得。ROS2環境必須。
+    with_yaw=False : (stamp, x, y) のリストを返す
+    with_yaw=True  : (stamp, x, y, yaw) のリストを返す（SE(2)アライメント基準用）
+    """
     import rosbag2_py
     from rclpy.serialization import deserialize_message
     from nav_msgs.msg import Odometry
@@ -148,7 +158,20 @@ def read_odom_from_bag(bag_path, topic_name):
         _, data, _ = reader.read_next()
         msg   = deserialize_message(data, Odometry)
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        records.append((stamp, msg.pose.pose.position.x, msg.pose.pose.position.y))
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+        if with_yaw:
+            qx, qy, qz, qw = (msg.pose.pose.orientation.x,
+                              msg.pose.pose.orientation.y,
+                              msg.pose.pose.orientation.z,
+                              msg.pose.pose.orientation.w)
+            t3 = 2.0 * (qw * qz + qx * qy)
+            t4 = 1.0 - 2.0 * (qy * qy + qz * qz)
+            yaw = math.atan2(t3, t4)
+            records.append((stamp, x, y, yaw))
+        else:
+            records.append((stamp, x, y))
+    records.sort(key=lambda r: r[0])
     return records
     
 def read_glim_traj_from_dump(dump_dir):
@@ -176,17 +199,47 @@ def _nearest(query, records, tol):
     return records[idx] if abs(stamps[idx] - query) <= tol else None
 
 
+def _align_glim_to_gps(glim_records, x0, y0, yaw0):
+    """GLIMローカル座標 → GPS座標系へSE(2)変換。
+    combine_glim と等価のアライメント（最初のGPSフレームを原点姿勢として一致させる）。
+        aligned_x = cos(yaw0)*gx - sin(yaw0)*gy + x0
+        aligned_y = sin(yaw0)*gx + cos(yaw0)*gy + y0
+    """
+    cos_y, sin_y = math.cos(yaw0), math.sin(yaw0)
+    return [(s, cos_y * gx - sin_y * gy + x0,
+                sin_y * gx + cos_y * gy + y0)
+            for s, gx, gy in glim_records]
+
+
 def build_correlation_table(occ_rows, glim_records, gps_records):
     """
     遮蔽率リスト × GLIM odom × GPS odom を時刻同期して誤差を算出。
+    内部で SE(2) アライメントを実施する：
+      - gps_records は (stamp, x, y, yaw) 形式（with_yaw=True で取得）
+      - gps_records[0] の (x0, y0, yaw0) を基準に GLIM 軌跡を GPS 座標系へ変換
+      - その後、時刻同期 → 誤差計算
     Returns: list of dict(stamp, occlusion_rate, gps_error, x_glim, y_glim, x_gps, y_gps)
+             ※ x_glim, y_glim は SE(2)アライメント済みの値（GPS座標系）
     """
+    if not gps_records:
+        print("  [ERROR] GPSレコードが空")
+        return []
+
+    # 最初のGPSフレームを基準にアライメント
+    _, x0, y0, yaw0 = gps_records[0]
+    print(f"  SE(2)アライメント基準: x0={x0:.3f}, y0={y0:.3f}, "
+          f"yaw0={math.degrees(yaw0):.2f}°")
+    glim_aligned = _align_glim_to_gps(glim_records, x0, y0, yaw0)
+
+    # GPS は (stamp, x, y, yaw) → 以降は (stamp, x, y) として扱う
+    gps_xy = [(s, x, y) for s, x, y, _ in gps_records]
+
     results, skipped = [], 0
     for row in occ_rows:
         stamp = row["stamp"]
         occ   = row["occlusion_rate"]
-        g = _nearest(stamp, glim_records, SYNC_TOL)
-        p = _nearest(stamp, gps_records,  SYNC_TOL)
+        g = _nearest(stamp, glim_aligned, SYNC_TOL)
+        p = _nearest(stamp, gps_xy,       SYNC_TOL)
         if g is None or p is None:
             skipped += 1
             continue
@@ -240,8 +293,6 @@ def main():
                         help="出力ディレクトリ")
     parser.add_argument("--no-gps",  action="store_true",
                         help="GPS誤差計算をスキップ（遮蔽率CSVのみ生成）")
-    parser.add_argument("--glim-topic", default=TOPIC_GLIM,
-                        help=f"GLIMのodometryトピック名 (default: {TOPIC_GLIM})")
     parser.add_argument("--gps-topic",  default=TOPIC_GPS,
                         help=f"GPSのodometryトピック名 (default: {TOPIC_GPS})")
     args = parser.parse_args()
@@ -278,7 +329,7 @@ def main():
     print(f"  bag: {bag_path}")
     try:
         glim_records = read_glim_traj_from_dump(dump_dir)
-        gps_records  = read_odom_from_bag(bag_path, args.gps_topic)
+        gps_records  = read_odom_from_bag(bag_path, args.gps_topic, with_yaw=True)
         print(f"  GLIM={len(glim_records)} サンプル(dump), "
               f"GPS={len(gps_records)} サンプル(bag)")
     except Exception as e:
@@ -289,7 +340,6 @@ def main():
     corr_rows = build_correlation_table(occ_rows, glim_records, gps_records)
     if not corr_rows:
         print("[ERROR] 時刻同期結果が0件。stampやトピック名を確認してください。")
-        print(f"  GLIM topic: {args.glim_topic}")
         print(f"  GPS  topic: {args.gps_topic}")
         print(f"  SYNC_TOL: {SYNC_TOL} 秒")
         sys.exit(1)
