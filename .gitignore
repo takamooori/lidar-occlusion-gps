@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# データ・解析出力（リポジトリ外なので念のため）
+*.bag
+*.db3
+*.bin
+*.pcd
+*.csv
+*.png
+*.jpg
+*.html
+
+# ただし docs/ 内の画像は例外
+!docs/**/*.png
+!docs/**/*.jpg
