@@ -7,7 +7,7 @@
 #   make analyze D=shibuya_0610  # 略称Dでdataset指定（推奨）
 #   make all DATASET=shibuya_0610 # フル名指定でも可
 #
-# 新datasetを追加するときは、命名規則 <location>_<MMDD> を守れば
+# 新datasetを追加するときは、命名規則 <location>_<MMDD> または <location>_<MMDD>_<HHMM> を守れば
 # 設定変更ゼロで実行できる（例: shibuya_0610）。
 #   - bag  : ~/ros2_ws/bag/<MMDD>/<dataset>_bag/*.db3
 #   - dump : ~/ros2_ws/dump/<dataset>/
@@ -22,7 +22,7 @@ DATASET ?= nakaniwa_0522
 
 # ---- パス自動推定 ----------------------------------------------------------
 # DATASET="nakaniwa_0522" → MMDD="0522"
-MMDD     := $(lastword $(subst _, ,$(DATASET)))
+MMDD     := $(word 2,$(subst _, ,$(DATASET)))
 ROOT     := $(HOME)/ros2_ws
 DUMP     := $(ROOT)/dump/$(DATASET)
 BAG_DIR  ?= $(ROOT)/bag/$(MMDD)/$(DATASET)_bag
