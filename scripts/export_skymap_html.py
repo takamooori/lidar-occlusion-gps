@@ -70,11 +70,14 @@ def build_data(dump_dir, n_rays, max_dist, min_dist, el_min, angle,
         masked = el < el_min
         status = np.where(masked, 2, np.where(res.ray_hit_mask, 1, 0)).astype(np.uint8)
         nhit = int((status == 1).sum())
+        pos = fd.position  # world座標 (x, y, z)
         frames.append({
             "label": folder,
             "stamp": (round(fd.stamp, 2) if fd.stamp else None),
             "occ": round(float(nhit) / R, 4),
             "nhit": nhit,
+            "x": round(float(pos[0]), 3),
+            "y": round(float(pos[1]), 3),
             "status": "".join(chr(48 + int(s)) for s in status),  # 長さR の '0/1/2' 文字列
         })
         if verbose:
@@ -120,7 +123,8 @@ TEMPLATE = r'''<meta charset="utf-8">
   h1{font-size:18px;font-weight:600;letter-spacing:.02em;margin:0;}
   .tag{font-family:var(--mono);font-size:11px;color:#2f6b62;background:#edf4f2;border:1px solid #d4e6e2;padding:2px 8px;border-radius:4px;font-weight:600;letter-spacing:.06em;}
   .sub{color:var(--muted);font-size:12.5px;font-family:var(--mono);}
-  .grid{display:grid;grid-template-columns:1fr 320px;gap:22px;align-items:start;}
+  .grid{display:grid;grid-template-columns:1.05fr 0.95fr 300px;gap:18px;align-items:start;}
+  @media(max-width:1180px){.grid{grid-template-columns:1fr 1fr;}}
   @media(max-width:820px){.grid{grid-template-columns:1fr;}}
   .stage{background:linear-gradient(180deg,#ffffff,#fafbfc);border:1px solid var(--line);border-radius:14px;padding:10px;position:relative;}
   svg{display:block;width:100%;height:auto;}
@@ -172,6 +176,18 @@ TEMPLATE = r'''<meta charset="utf-8">
     <div>
       <div class="stage" id="stage"><svg id="sky" viewBox="0 0 560 560"></svg></div>
       <div class="gridview" id="gridview"></div>
+    </div>
+    <div>
+      <div class="panel" style="padding:14px">
+        <div class="timeline-h"><span class="k">キーフレーム位置（GLIM軌跡 · 遮蔽率カラー）</span><span class="sub" id="mapcoord">–</span></div>
+        <svg id="mapview" viewBox="0 0 360 360" style="background:#fff;border:1px solid var(--line);border-radius:8px;"></svg>
+        <div class="legend" style="margin-top:10px;justify-content:space-between">
+          <span><i class="dot" style="background:#5277ac"></i>低 occ</span>
+          <span style="font-size:10.5px;color:var(--dim)">クリックでフレーム切替</span>
+          <span><i class="dot" style="background:#d15a52"></i>高 occ</span>
+        </div>
+        <div class="hint" id="maphint">XY: world座標 [m] · 現在フレームは <span style="color:var(--accent2)">●</span></div>
+      </div>
     </div>
     <div>
       <div class="panel">
@@ -251,7 +267,81 @@ function setFrame(f){
   document.getElementById('occbar').style.width=(fr.occ*100).toFixed(1)+'%';
   document.getElementById('slider').value=cur; document.getElementById('num').value=cur;
   updateMarker();
+  updateMapMarker();
   document.querySelectorAll('.mini').forEach((m,i)=>m.classList.toggle('cur',i===cur));
+}
+
+// ====== 位置パネル（GLIM軌跡 + 遮蔽率カラー） ======
+const mapview=document.getElementById('mapview');
+const MW=360, MH=360, MPAD=28;
+const XS=FRAMES.map(f=>f.x), YS=FRAMES.map(f=>f.y);
+const xMin=Math.min.apply(null,XS), xMax=Math.max.apply(null,XS);
+const yMin=Math.min.apply(null,YS), yMax=Math.max.apply(null,YS);
+const xRng=Math.max(xMax-xMin,0.1), yRng=Math.max(yMax-yMin,0.1);
+const dataAspect=xRng/yRng, plotW=MW-2*MPAD, plotH=MH-2*MPAD;
+let mx0, mx1, my0, my1;
+// アスペクト比を保ってプロット領域に収める
+if(dataAspect > plotW/plotH){
+  const usedH = plotW/dataAspect;
+  mx0=MPAD; mx1=MW-MPAD; my0=MPAD+(plotH-usedH)/2; my1=my0+usedH;
+}else{
+  const usedW = plotH*dataAspect;
+  my0=MPAD; my1=MH-MPAD; mx0=MPAD+(plotW-usedW)/2; mx1=mx0+usedW;
+}
+function mx(x){return mx0+(x-xMin)/xRng*(mx1-mx0);}
+function my(y){return my1-(y-yMin)/yRng*(my1-my0);}  // Y軸は上向き
+// occを 0..1 に正規化してカラーマップ
+function occColor(o){
+  const t=(o-occMin)/((occMax-occMin)||1);
+  // 青(#5277ac) → 灰 → 赤(#d15a52)
+  const r=Math.round(82 + t*(209-82));
+  const g=Math.round(119 + t*(90-119));
+  const b=Math.round(172 + t*(82-172));
+  return 'rgb('+r+','+g+','+b+')';
+}
+// 枠
+mapview.appendChild(el2('rect',{x:mx0-4,y:my0-4,width:(mx1-mx0)+8,height:(my1-my0)+8,fill:'#fafbfc',stroke:'#eef0f3','stroke-width':1,rx:4}));
+// 軌跡線（細い灰色）
+let pd=''; FRAMES.forEach((f,i)=>{ pd += (i?'L':'M')+mx(f.x).toFixed(1)+' '+my(f.y).toFixed(1)+' '; });
+mapview.appendChild(el2('path',{d:pd,fill:'none',stroke:'#c2c7d0','stroke-width':1.2}));
+// 各フレームのドット
+const MDOT=[];
+FRAMES.forEach((f,i)=>{
+  const c=el2('circle',{cx:mx(f.x).toFixed(1),cy:my(f.y).toFixed(1),r:3.4,fill:occColor(f.occ),
+                        stroke:'#fff','stroke-width':0.6,cursor:'pointer'});
+  c.addEventListener('click',()=>{stop();setFrame(i);});
+  // ツールチップ用 title
+  const t=el2('title',{}); t.textContent='frame '+f.label+' / occ='+f.occ.toFixed(3)+' / xy=('+f.x+', '+f.y+')';
+  c.appendChild(t);
+  mapview.appendChild(c); MDOT.push(c);
+});
+// 始点（S）・終点（E）マーカー
+function labelDot(x,y,txt,col){
+  mapview.appendChild(el2('circle',{cx:x,cy:y,r:6,fill:'none',stroke:col,'stroke-width':1.6}));
+  const tt=el2('text',{x:x+9,y:y+4,fill:col,'font-size':10.5,'font-family':'ui-monospace,monospace'});
+  tt.textContent=txt; mapview.appendChild(tt);
+}
+labelDot(mx(XS[0]),my(YS[0]),'S','#4a505c');
+labelDot(mx(XS[N_FRAMES-1]),my(YS[N_FRAMES-1]),'E','#4a505c');
+// 軸ラベル（XY範囲のみ簡易表示）
+function axText(x,y,txt,anchor){
+  const t=el2('text',{x:x,y:y,fill:'#9aa0ab','font-size':9.5,'text-anchor':anchor||'middle','font-family':'ui-monospace,monospace'});
+  t.textContent=txt; mapview.appendChild(t);
+}
+axText(mx0, my1+14, xMin.toFixed(1)+' m','start');
+axText(mx1, my1+14, xMax.toFixed(1)+' m','end');
+axText(mx0-6, my1+4, yMin.toFixed(1)+'','end');
+axText(mx0-6, my0+8, yMax.toFixed(1)+'','end');
+axText((mx0+mx1)/2, my1+14, 'X','middle');
+axText(mx0-18, (my0+my1)/2, 'Y','middle');
+// 現在フレームのハイライト（金色リング）
+const curRing=el2('circle',{cx:mx(XS[0]),cy:my(YS[0]),r:7,fill:'none',stroke:'#b88a3e','stroke-width':2.0});
+mapview.appendChild(curRing);
+function updateMapMarker(){
+  const f=FRAMES[cur];
+  curRing.setAttribute('cx',mx(f.x).toFixed(1));
+  curRing.setAttribute('cy',my(f.y).toFixed(1));
+  document.getElementById('mapcoord').textContent='x='+f.x+', y='+f.y+' m';
 }
 
 const tl=document.getElementById('timeline'); const TW=288,TH=70,PAD=8;
