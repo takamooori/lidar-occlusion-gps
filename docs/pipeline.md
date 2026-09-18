@@ -61,7 +61,7 @@
 
 ```bash
 # T1
-ros2 run glim_ros glim_rosnode --ros-args -p use_sim_time:=true
+ros2 run glim_ros glim_rosnode
 
 # T2  CustomMsg → PointCloud2（lidar / lidar2 の2ノードが立つ）
 ros2 launch livox_to_pointcloud2 livox_to_pointcloud2.launch.py

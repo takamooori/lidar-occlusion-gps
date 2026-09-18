@@ -41,7 +41,7 @@ compare_trajectory.py（軌跡PNG。/odom/UM982 依存のため0731以降は不�
 
 ```bash
 # GLIM（3ターミナル）
-ros2 run glim_ros glim_rosnode --ros-args -p use_sim_time:=true   # T1（短縮方法は検討中）
+ros2 run glim_ros glim_rosnode                                    # T1（use_sim_time焼き込み済み）
 ros2 launch livox_to_pointcloud2 livox_to_pointcloud2.launch.py   # T2
 cd ~/ros2_ws/bag && ros2 bag play <bag> --clock -r 0.5            # T3
 # 終了: T1をCtrl+C → /tmp/dump に自動保存
