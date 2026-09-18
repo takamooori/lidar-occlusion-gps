@@ -131,6 +131,23 @@ def load_occlusion_csv(path):
                 d["folder"] = row["folder"]
             rows.append(d)
     return rows
+   
+def load_gps_csv(path, with_yaw=False):
+    """extract_gps_raw.py の出力を read_odom_from_bag と同じ形式で返す。"""
+    import csv as _csv
+    records = []
+    with open(path, newline="") as fp:
+        for row in _csv.DictReader(fp):
+            if not row.get("x") or not row.get("y"):
+                continue
+            stamp, x, y = float(row["stamp"]), float(row["x"]), float(row["y"])
+            if with_yaw:
+                yaw = float(row["yaw"]) if row.get("yaw") else 0.0
+                records.append((stamp, x, y, yaw))
+            else:
+                records.append((stamp, x, y))
+    records.sort(key=lambda r: r[0])
+    return records
 
 
 # ──────────────────────────────────────────────
@@ -295,6 +312,8 @@ def main():
                         help="GPS誤差計算をスキップ（遮蔽率CSVのみ生成）")
     parser.add_argument("--gps-topic",  default=TOPIC_GPS,
                         help=f"GPSのodometryトピック名 (default: {TOPIC_GPS})")
+    parser.add_argument("--gps-csv", default=None,
+                        help="extract_gps_raw.py の出力CSVからGPSを読む（bagの代わり）")
     args = parser.parse_args()
 
     dump_dir = os.path.expanduser(args.dump)
@@ -329,7 +348,10 @@ def main():
     print(f"  bag: {bag_path}")
     try:
         glim_records = read_glim_traj_from_dump(dump_dir)
-        gps_records  = read_odom_from_bag(bag_path, args.gps_topic, with_yaw=True)
+        if args.gps_csv:
+            gps_records = load_gps_csv(args.gps_csv, with_yaw=True)
+        else:
+            gps_records = read_odom_from_bag(bag_path, args.gps_topic, with_yaw=True)
         print(f"  GLIM={len(glim_records)} サンプル(dump), "
               f"GPS={len(gps_records)} サンプル(bag)")
     except Exception as e:

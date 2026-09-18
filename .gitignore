@@ -30,3 +30,10 @@ Thumbs.db
 # ただし docs/ 内の画像は例外
 !docs/**/*.png
 !docs/**/*.jpg
+
+# GLIM viewer layout
+imgui.ini
+
+# backups
+*.bak
+notebooks/bak./

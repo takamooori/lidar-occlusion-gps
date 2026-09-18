@@ -36,10 +36,18 @@ NOTEBOOK := notebooks/plot_notebook.ipynb
 # ---- 共通オプション --------------------------------------------------------
 PIPELINE_ARGS := --dump $(DUMP) --bag $(BAG) --out $(OUT)
 
+# ---- /gps_raw 経由のGPS（/odom/UM982 が無いbag用） -------------------------
+GPS_CSV ?=
+PPP_PKG ?= orange_msgs_0723
+HDT_OFFSET ?= -90
+ifneq ($(strip $(GPS_CSV)),)
+PIPELINE_ARGS += --gps-csv $(GPS_CSV)
+endif
+
 # ============================================================================
 # Targets
 # ============================================================================
-.PHONY: help all analyze compare notebook occ-only show clean check
+.PHONY: help all analyze compare notebook occ-only show clean check gps
 
 .DEFAULT_GOAL := help
 
@@ -78,6 +86,12 @@ notebook:  ## ③ plot_notebook.ipynb を開く（VS Code）
 	else \
 	    jupyter notebook $(NOTEBOOK); \
 	fi
+
+gps: check  ## /gps_raw から GPS CSV を生成（quality付き）
+	@echo "[make] gps: DATASET=$(DATASET)"
+	@mkdir -p $(OUT)
+	$(PY) $(SCRIPTS)/extract_gps_raw.py $(BAG_DIR) -o $(OUT)/gps_raw.csv \
+	  --ppp-pkg $(PPP_PKG) --hdt-offset $(HDT_OFFSET)
 
 occ-only: check-dump  ## 遮蔽率のみ計算（GPS/bagなし）
 	@echo "[make] occ-only: DATASET=$(DATASET)"
