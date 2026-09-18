@@ -12,16 +12,26 @@ GLIM Inspector - GLIMダンプデータの確認・可視化ツール
     /debug_min_sphere : 近傍除去ゾーン（半透明赤の小球, r=MIN_DIST）
     /debug_max_sphere : 距離上限境界（青ワイヤー上半球, r=MAX_DIST）
     /debug_el_cone    : 仰角境界（黄ワイヤー円錐, el=EL_MIN_DEG）
+    /debug_rays_hit   : 遮蔽判定レイ（赤、ヒット点まで線分）
+    /debug_rays_miss  : 開空判定レイ（緑、max_distまで線分）
+    /debug_rays_mask  : mask外レイ（灰、仰角<EL_MIN_DEGのレイ、短く描画）
   RViz 側で各トピックの ON/OFF を切り替えて比較できる。
+  レイ表示の本数は冒頭の RAYS_DISPLAY_STRIDE で調整。
 """
 
 # ============================================================
-# 設定（ここだけ変える）
+# 設定（ここだけ変える）/home/ubuntu/ros2_ws/dump/kitakan_0615_1008
+#                                  "~/ros2_ws/dump/nakaniwa_0522"
 # ============================================================
-DEFAULT_DUMP = "~/ros2_ws/dump/nakaniwa_0522"
+DEFAULT_DUMP = "~/ros2_ws/dump/kitakan_0615_1008"
 MAX_DIST     = 30.0   # 距離上限 [m]
-MIN_DIST     = 2.0    # 近傍除去 [m]（人間・自己反射対策）
+MIN_DIST     = 1.5    # 近傍除去 [m]（人間・自己反射対策）
 EL_MIN_DEG   = 15.0   # 仰角カットオフ [度]（GPS mask角に対応）
+ANGLE_DEG    = 5.0    # レイと点の許容角度 [度]（遮蔽率計算と統一）
+N_RAYS                 = 1000  # 遮蔽率計算で使うレイ本数（occlusion_coreデフォルト）
+RAYS_DISPLAY_STRIDE    = 4     # rvizでのレイ表示間引き（1000本→250本）。1で全表示
+RAYS_LINE_WIDTH        = 0.02  # rvizでのレイの線の太さ [m]
+RAYS_MASK_LENGTH       = 5.0   # mask外レイの描画長さ [m]（短くしておく）
 # ============================================================
 
 import argparse
@@ -236,6 +246,31 @@ def make_cone_wireframe_marker(el_deg, r_max, color_rgba, marker_id,
     return m
 
 
+def make_rays_marker(ray_dirs, lengths, color_rgba, marker_id, ns="rays",
+                     line_width=RAYS_LINE_WIDTH):
+    """LINE_LIST型Marker。原点(0,0,0)から各レイ方向に lengths[i] だけ伸ばす線分群。
+
+    遮蔽率計算と整合するレイ可視化に使用。color はメッセージで保持。
+
+    ray_dirs : (R,3) 単位方向ベクトル
+    lengths  : (R,)  各レイの長さ [m]
+    """
+    from visualization_msgs.msg import Marker
+    from geometry_msgs.msg import Point
+
+    m = _new_marker(Marker.LINE_LIST, marker_id, color_rgba, ns=ns,
+                    line_width=line_width)
+    pts = []
+    for d, L in zip(ray_dirs, lengths):
+        p0 = Point(); p0.x = 0.0; p0.y = 0.0; p0.z = 0.0
+        p1 = Point(); p1.x = float(d[0] * L); p1.y = float(d[1] * L); p1.z = float(d[2] * L)
+        pts.append(p0); pts.append(p1)
+    m.points = pts
+    return m
+
+
+
+
 # ============================================================
 # RViz 設定生成
 # ============================================================
@@ -430,25 +465,42 @@ def menu_dist_stats(dump_dir, folders, frame_idx):
 
 
 def menu_frame_rviz(dump_dir, folders, start_idx):
-    """[3] 点群 → RViz（全点 + 上半球 + 境界Marker、フレーム切り替えあり）"""
+    """[3] 点群 → RViz（全点 + 上半球 + 境界Marker + レイ、フレーム切り替えあり）"""
     from sensor_msgs.msg import PointCloud2
     from visualization_msgs.msg import Marker
+    from occlusion_core import (
+        compute_occlusion, fibonacci_hemisphere, azimuth_elevation,
+    )
 
-    print(f"フィルタ: MIN_DIST={MIN_DIST}m, MAX_DIST={MAX_DIST}m, EL_MIN={EL_MIN_DEG}°"
-          f"（変更はスクリプト冒頭の設定を編集）")
+    # 全フレーム共通のレイ集合と表示用マスクを事前計算
+    rays_all = fibonacci_hemisphere(N_RAYS)               # (R,3)
+    _, ray_el = azimuth_elevation(rays_all)               # 各レイの仰角[deg]
+    stride = max(1, int(RAYS_DISPLAY_STRIDE))
+    show_idx = np.arange(len(rays_all))[::stride]         # 表示するレイのインデックス
+
+    print(f"フィルタ: MIN_DIST={MIN_DIST}m, MAX_DIST={MAX_DIST}m, EL_MIN={EL_MIN_DEG}°, "
+          f"ANGLE={ANGLE_DEG}°（変更はスクリプト冒頭の設定を編集）")
+    print(f"レイ表示: 全{N_RAYS}本 / 表示{len(show_idx)}本 (stride={stride})\n")
+
     generate_rviz_config(dump_dir, [
         ("PointCloud2", "/debug_points"),
         ("PointCloud2", "/debug_upper"),
         ("Marker",      "/debug_min_sphere"),
         ("Marker",      "/debug_max_sphere"),
         ("Marker",      "/debug_el_cone"),
+        ("Marker",      "/debug_rays_hit"),
+        ("Marker",      "/debug_rays_miss"),
+        ("Marker",      "/debug_rays_mask"),
     ])
     print("RViz2 でトピックのチェックを切り替えて表示を選択してください")
     print(f"  /debug_points     : 全点群")
     print(f"  /debug_upper      : フィルタ通過点（遮蔽計算の対象）")
     print(f"  /debug_min_sphere : 近傍除去ゾーン (赤・半透明solid球, r={MIN_DIST}m)")
     print(f"  /debug_max_sphere : 距離上限境界 (青ワイヤー上半球, r={MAX_DIST}m)")
-    print(f"  /debug_el_cone    : 仰角境界 (黄ワイヤー円錐, el={EL_MIN_DEG}°)\n")
+    print(f"  /debug_el_cone    : 仰角境界 (黄ワイヤー円錐, el={EL_MIN_DEG}°)")
+    print(f"  /debug_rays_hit   : 遮蔽判定レイ（赤、ヒット点まで）")
+    print(f"  /debug_rays_miss  : 開空判定レイ（緑、max_distまで）")
+    print(f"  /debug_rays_mask  : mask外レイ（灰、仰角<{EL_MIN_DEG}°のレイ）\n")
 
     pubs = {}
 
@@ -459,12 +511,51 @@ def menu_frame_rviz(dump_dir, folders, start_idx):
             pubs["min_sph"] = node.create_publisher(Marker,      "/debug_min_sphere", 10)
             pubs["max_sph"] = node.create_publisher(Marker,      "/debug_max_sphere", 10)
             pubs["el_cone"] = node.create_publisher(Marker,      "/debug_el_cone",    10)
+            pubs["r_hit"]   = node.create_publisher(Marker,      "/debug_rays_hit",   10)
+            pubs["r_miss"]  = node.create_publisher(Marker,      "/debug_rays_miss",  10)
+            pubs["r_mask"]  = node.create_publisher(Marker,      "/debug_rays_mask",  10)
 
         pts  = load_points(dump_dir, folders[idx])
         mask = filter_points(pts)
         upper = pts[mask]
+
+        # 遮蔽率計算（レイ可視化用にここで全レイ判定を取得）
+        res = compute_occlusion(pts, rays=rays_all,
+                                max_dist=MAX_DIST, min_dist=MIN_DIST,
+                                el_min_deg=EL_MIN_DEG, angle_deg=ANGLE_DEG,
+                                track_hits=True)
         print(f"  全{len(pts):,}点 / フィルタ通過{len(upper):,}点 "
-              f"({100*len(upper)/max(len(pts),1):.1f}%)")
+              f"({100*len(upper)/max(len(pts),1):.1f}%) / occ={res.occlusion_rate:.3f}")
+
+        # レイの3グループ分け（表示間引き済みインデックスで）
+        masked_ray = ray_el[show_idx] < EL_MIN_DEG        # mask外（低仰角レイ）
+        hit_ray    = res.ray_hit_mask[show_idx] & (~masked_ray)
+        miss_ray   = (~res.ray_hit_mask[show_idx]) & (~masked_ray)
+
+        # 各レイの長さ
+        # hit: ヒット点までの距離（dataにあれば）、なければ max_dist
+        # miss: max_dist まで
+        # mask: RAYS_MASK_LENGTH まで（短く）
+        hit_lengths = np.full(len(show_idx), MAX_DIST)
+        if len(res.pts_upper) > 0:
+            hit_pt_idx = res.ray_hit_point_idx[show_idx]
+            for i, pi in enumerate(hit_pt_idx):
+                if pi >= 0:
+                    hit_lengths[i] = float(np.linalg.norm(res.pts_upper[pi]))
+
+        miss_lengths = np.full(len(show_idx), MAX_DIST)
+        mask_lengths = np.full(len(show_idx), RAYS_MASK_LENGTH)
+
+        # 各グループのMarkerを作成（該当しないレイは空でOK）
+        hit_mk  = make_rays_marker(rays_all[show_idx][hit_ray],
+                                    hit_lengths[hit_ray],
+                                    (0.95, 0.20, 0.18, 0.85), 10, ns="rays_hit")
+        miss_mk = make_rays_marker(rays_all[show_idx][miss_ray],
+                                    miss_lengths[miss_ray],
+                                    (0.20, 0.85, 0.35, 0.55), 11, ns="rays_miss")
+        mask_mk = make_rays_marker(rays_all[show_idx][masked_ray],
+                                    mask_lengths[masked_ray],
+                                    (0.6, 0.6, 0.65, 0.35), 12, ns="rays_mask")
 
         # 境界Marker（フレームに依らず固定だが、stamp更新のため毎回作る）
         min_mk  = make_sphere_marker(MIN_DIST,
@@ -480,6 +571,9 @@ def menu_frame_rviz(dump_dir, folders, start_idx):
             (pubs["min_sph"], min_mk),
             (pubs["max_sph"], max_mk),
             (pubs["el_cone"], cone_mk),
+            (pubs["r_hit"],   hit_mk),
+            (pubs["r_miss"],  miss_mk),
+            (pubs["r_mask"],  mask_mk),
         ]
 
     interactive_publish(dump_dir, folders, start_idx, build_msgs)
